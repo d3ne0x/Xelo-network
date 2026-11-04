@@ -1,126 +1,100 @@
+name: XELO - Phase 0 validation
+
+# Fast tests on PRs. Full builds run only when manually requested.
+# No artifact uploads, deployments or controller builds in Phase 0.
 on:
   pull_request:
+    branches: [dev]
   push:
+    branches: [dev]
   workflow_dispatch:
+    inputs:
+      platform:
+        description: Select the full MPL-only build target
+        required: true
+        type: choice
+        default: linux
+        options:
+          - linux
+          - windows
+          - both
+
+permissions:
+  contents: read
+
+concurrency:
+  group: xelo-phase0-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  build_ubuntu:
-    runs-on: ubuntu-latest
+  fast-checks:
+    name: Fast checks - no C++ build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
     steps:
-    - name: gitconfig
-      run: |
-        git config --global core.autocrlf input
-      #        git config --global core.eol lf
-    - name: checkout
-      uses: actions/checkout@v4
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
-      with:
-        toolchain: stable
-        targets: x86_64-unknown-linux-gnu
-        components: rustfmt, clippy
+      - uses: actions/checkout@v4
+      - name: Compile Python guard and tests
+        run: python3 -m compileall -q scripts/xelo_verify_free_build.py tests/xelo_phase0
+      - name: Run Phase 0 unit tests
+        run: python3 -m unittest discover -s tests/xelo_phase0 -p 'test_*.py' -v
 
-    - name: Set up cargo cache
-      uses: Swatinem/rust-cache@v2
-      continue-on-error: false
-      with:
-        key: ${{ runner.os }}-cargo-${{ hashFiles('rustybits//Cargo.lock') }}
-        shared-key: ${{ runner.os }}-cargo-
-        workspaces: |
-          rustybits/
-
-    - name: make
-      run: make
-    - name: selftest
-      run: |
-        make selftest
-        ./zerotier-selftest
-    - name: 'Tar files' # keeps permissions (execute)
-      run: tar -cvf zerotier-one.tar zerotier-one
-    - name: Archive production artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: zerotier-one-ubuntu-x64
-        path: zerotier-one.tar
-        retention-days: 7
-
-  build_macos:
-    runs-on: macos-latest
+  linux-free:
+    name: Manually requested Linux x64 MPL-only build
+    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.platform == 'linux' || inputs.platform == 'both') }}
+    needs: fast-checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
     steps:
-    - name: gitconfig
-      run: |
-        git config --global core.autocrlf input
-      #        git config --global core.eol lf
-    - name: checkout
-      uses: actions/checkout@v4
-    - name: Install Rust aarch64
-      uses: dtolnay/rust-toolchain@stable
-      with:
-        toolchain: stable
-        target: aarch64-apple-darwin
-        components: rustfmt, clippy
-    - name: Install Rust x86_64
-      uses: dtolnay/rust-toolchain@stable
-      with:
-        toolchain: stable
-        target: x86_64-apple-darwin
-        components: rustfmt, clippy
-    - name: Set up cargo cache
-      uses: Swatinem/rust-cache@v2
-      continue-on-error: false
-      with:
-        key: ${{ runner.os }}-cargo-${{ hashFiles('rustybits//Cargo.lock') }}
-        shared-key: ${{ runner.os }}-cargo-
-        workspaces: |
-          rustybits/
-    - name: make
-      run: make
-    - name: selftest
-      run: |
-        make selftest
-        ./zerotier-selftest
-    - name: 'Tar files' # keeps permissions (execute)
-      run: tar -cvf zerotier-one.tar zerotier-one
-    - name: Archive production artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: zerotier-one-mac
-        path: zerotier-one.tar
-        retention-days: 7
+      - uses: actions/checkout@v4
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake ninja-build pkg-config libssl-dev nlohmann-json3-dev python3
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Bootstrap header-only OpenTelemetry API
+        run: bash scripts/bootstrap-deps.sh
+      - name: Configure MPL-only daemon
+        run: cmake --preset linux-free-release -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+      - name: Check disabled controller and compiled sources
+        run: |
+          python3 scripts/xelo_verify_free_build.py \
+            --cache build-linux-free-release/CMakeCache.txt \
+            --compile-commands build-linux-free-release/compile_commands.json
+      - name: Build
+        run: cmake --build --preset linux-free-release --parallel 2
+      - name: Run upstream selftest
+        run: ./build-linux-free-release/zerotier-selftest
 
-
-  build_windows:
+  windows-free:
+    name: Manually requested Windows x64 MPL-only build
+    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.platform == 'windows' || inputs.platform == 'both') }}
+    needs: fast-checks
     runs-on: windows-2022
+    timeout-minutes: 90
     steps:
-    - name: gitconfig
-      run: |
-        git config --global core.autocrlf true
-      #        git config --global core.eol lf
-    - name: checkout
-      uses: actions/checkout@v4
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
-      with:
-        toolchain: stable
-        targets: x86_64-pc-windows-msvc
-        components: rustfmt, clippy
-    - name: Set up cargo cache
-      uses: Swatinem/rust-cache@v2
-      continue-on-error: false
-      with:
-        key: ${{ runner.os }}-cargo-${{ hashFiles('rustybits//Cargo.lock') }}
-        shared-key: ${{ runner.os }}-cargo-
-        workspaces: |
-          rustybits/
-
-    - name: setup msbuild
-      uses: microsoft/setup-msbuild@v2
-    - name: msbuild
-      run: |
-        msbuild windows\ZeroTierOne.sln /m /p:Configuration=Release  /property:Platform=x64 /t:ZeroTierOne
-    - name: Archive production artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: zerotier-one-windows
-        path: windows/Build
-        retention-days: 7
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - name: Discover vcpkg
+        shell: pwsh
+        run: |
+          $root = $env:VCPKG_INSTALLATION_ROOT
+          if (-not $root) { $root = 'C:\vcpkg' }
+          if (-not (Test-Path (Join-Path $root 'scripts\buildsystems\vcpkg.cmake'))) {
+            throw "vcpkg not found at $root; adjust runner prerequisites."
+          }
+          "VCPKG_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Bootstrap Windows x64 OpenTelemetry API
+        shell: pwsh
+        run: |
+          .\scripts\bootstrap-deps.ps1 -Arch x64
+          if ($LASTEXITCODE -ne 0) { throw 'Dependency bootstrap failed' }
+      - name: Configure MPL-only daemon
+        run: cmake --preset windows-x64-free
+      - name: Check disabled controller
+        run: python scripts/xelo_verify_free_build.py --cache build-windows-x64-free/CMakeCache.txt
+      - name: Build
+        run: cmake --build --preset windows-x64-free-release --parallel 2
