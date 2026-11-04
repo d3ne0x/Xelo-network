@@ -1,91 +1,100 @@
-name: XELO - MPL-only build validation
+name: XELO - Phase 0 validation
 
-# Fork-specific CI. Do not build, package, or publish the nonfree controller.
+# Fast tests on PRs. Full builds run only when manually requested.
+# No artifact uploads, deployments or controller builds in Phase 0.
 on:
   pull_request:
+    branches: [dev]
   push:
-    branches:
-      - dev
-      - 'feature/**'
+    branches: [dev]
   workflow_dispatch:
+    inputs:
+      platform:
+        description: Select the full MPL-only build target
+        required: true
+        type: choice
+        default: linux
+        options:
+          - linux
+          - windows
+          - both
 
 permissions:
   contents: read
 
+concurrency:
+  group: xelo-phase0-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
-  linux-free:
-    name: Linux x64 / MPL-only
+  fast-checks:
+    name: Fast checks - no C++ build
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
+      - name: Compile Python guard and tests
+        run: python3 -m compileall -q scripts/xelo_verify_free_build.py tests/xelo_phase0
+      - name: Run Phase 0 unit tests
+        run: python3 -m unittest discover -s tests/xelo_phase0 -p 'test_*.py' -v
 
+  linux-free:
+    name: Manually requested Linux x64 MPL-only build
+    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.platform == 'linux' || inputs.platform == 'both') }}
+    needs: fast-checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
       - name: Install native dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential cmake ninja-build pkg-config libssl-dev nlohmann-json3-dev python3
-
-      - name: Install Rust toolchain
+      - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
-
-      - name: Test XELO free-build guard
-        run: python3 -m unittest discover -s tests/xelo_phase0 -p 'test_*.py' -v
-
       - name: Bootstrap header-only OpenTelemetry API
         run: bash scripts/bootstrap-deps.sh
-
       - name: Configure MPL-only daemon
         run: cmake --preset linux-free-release -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
-
-      - name: Enforce free-build configuration and compiled-source boundary
+      - name: Check disabled controller and compiled sources
         run: |
-          python3 scripts/xelo_verify_free_build.py --cache build-linux-free-release/CMakeCache.txt --compile-commands build-linux-free-release/compile_commands.json
-
-      - name: Build daemon and upstream self-test
+          python3 scripts/xelo_verify_free_build.py \
+            --cache build-linux-free-release/CMakeCache.txt \
+            --compile-commands build-linux-free-release/compile_commands.json
+      - name: Build
         run: cmake --build --preset linux-free-release --parallel 2
-
-      - name: Execute upstream self-test
+      - name: Run upstream selftest
         run: ./build-linux-free-release/zerotier-selftest
 
   windows-free:
-    name: Windows x64 / MPL-only
+    name: Manually requested Windows x64 MPL-only build
+    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.platform == 'windows' || inputs.platform == 'both') }}
+    needs: fast-checks
     runs-on: windows-2022
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
+      - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
-
-      - name: Discover vcpkg installation
+      - name: Discover vcpkg
         shell: pwsh
         run: |
           $root = $env:VCPKG_INSTALLATION_ROOT
           if (-not $root) { $root = 'C:\vcpkg' }
           if (-not (Test-Path (Join-Path $root 'scripts\buildsystems\vcpkg.cmake'))) {
-            throw "vcpkg not found at $root; update this CI setup for the runner image."
+            throw "vcpkg not found at $root; adjust runner prerequisites."
           }
           "VCPKG_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-
-      - name: Test XELO free-build guard
-        run: python -m unittest discover -s tests/xelo_phase0 -p 'test_*.py' -v
-
       - name: Bootstrap Windows x64 OpenTelemetry API
         shell: pwsh
         run: |
           .\scripts\bootstrap-deps.ps1 -Arch x64
           if ($LASTEXITCODE -ne 0) { throw 'Dependency bootstrap failed' }
-
       - name: Configure MPL-only daemon
         run: cmake --preset windows-x64-free
-
-      - name: Enforce free-build CMake configuration
+      - name: Check disabled controller
         run: python scripts/xelo_verify_free_build.py --cache build-windows-x64-free/CMakeCache.txt
-
-      - name: Build MPL-only daemon
+      - name: Build
         run: cmake --build --preset windows-x64-free-release --parallel 2
-
-# No artifact upload or distribution until the full dependency/license audit
-# and release approval are complete.
