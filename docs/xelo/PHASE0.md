@@ -27,9 +27,12 @@ roots, routing behavior, or upstream attribution in Phase 0.
 The upstream `build.yml` and `validate.yml` ran ordinary make builds, which
 may include the source-available FileDB controller. The upstream
 `central-controller.yaml` targeted ZeroTier-owned GCP/container infrastructure
-and self-hosted runners. XELO's automated build has been replaced with
-`ZT_NONFREE=OFF` CMake presets and both legacy deployment/extended-validation
-jobs are disabled pending an explicit audit.
+and self-hosted runners. XELO now runs **fast Python/preset checks automatically**
+on PRs and on pushes to `dev`. Full `ZT_NONFREE=OFF` Linux/Windows builds require
+an explicit manual GitHub Actions dispatch or the local build helper. Both
+legacy deployment/extended-validation jobs are disabled pending audit.
+See [BUILD_STRATEGY.md](BUILD_STRATEGY.md) for the free-hosted-runner policy,
+local SAIA checks and isolated VM full builds.
 
 ## Build gate
 
